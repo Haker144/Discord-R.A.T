@@ -1,0 +1,40 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Virtual environments
+venv/
+ENV/
+env/
+
+# VS Code settings
+.vscode/
+
+# PyInstaller
+*.spec
+build/
+
+# Distribution
+dist/
+*.egg-info/
+
+# Logs and databases
+log.db
+*.log
+
+# Environment variables
+.env
+
+# Executables
+ngrok.exe
+
+# IDEs
+.idea/
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Markdown files
+*.md
